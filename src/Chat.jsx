@@ -8,7 +8,7 @@ const MESSAGE_COLLECTION = 'messages';
 const STATUS_COLLECTION = 'status';
 
 // DEFINICIÓN DE USUARIOS VÁLIDOS
-const USUARIO_A = 'Alina';
+const USUARIO_A = "Tati";
 const USUARIO_B = 'Ben'; 
 const VALID_USERS = [USUARIO_A, USUARIO_B];
 const NICKNAME_KEY = 'chatAppNickname';
