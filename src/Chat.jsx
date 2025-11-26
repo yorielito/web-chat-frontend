@@ -125,15 +125,22 @@ function ChatCore({ nickname }) {
   const typingTimeoutRef = useRef(null); // <-- Única referencia para el estado de escritura
   const readStatusTimeoutRef = useRef(null); // <-- NUEVA Referencia para el estado de lectura (fix scroll)
   const fileInputRef = useRef(null);
+  const isInitialLoadRef = useRef(true); // Para el scroll inicial
 
   // HELPERS
-  const scrollToBottom = (behavior = "smooth") =>
-    messagesEndRef.current?.scrollIntoView({ behavior });
+  // Baja el scroll al final del chat (usado en el envío de nuevos mensajes o carga inicial)
+  const scrollToBottom = useCallback(() => {
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop =
+        messagesContainerRef.current.scrollHeight;
+    }
+  }, []);
+
   const keepScrollPosition = useCallback((oldScrollHeight) => {
     if (messagesContainerRef.current) {
       const newScrollHeight = messagesContainerRef.current.scrollHeight;
-      messagesContainerRef.current.scrollTop =
-        newScrollHeight - oldScrollHeight;
+      const heightDifference = newScrollHeight - oldScrollHeight;
+      messagesContainerRef.current.scrollTop = heightDifference;
     }
   }, []);
 
@@ -185,13 +192,14 @@ function ChatCore({ nickname }) {
 
   // PAGINIERUNG: LADEN ÄLTERER NACHRICHTEN
   const loadOlderMessages = useCallback(async () => {
-    if (!hasMoreMessages || isPaginating || !oldestDocRef) return;
+    // Verificación CRÍTICA: Salir si no hay más, si ya está paginando, o si la referencia es nula
+    if (!hasMoreMessages || isPaginating || !oldestDocRef?.id) return;
 
     setIsPaginating(true);
 
-    // Guardar la altura actual para mantener la posición
     const oldScrollHeight = messagesContainerRef.current.scrollHeight;
 
+    // Consulta que inicia *después* del documento más antiguo conocido
     const qOlder = query(
       collection(db, MESSAGE_COLLECTION),
       where("conversationId", "==", conversationId),
@@ -205,10 +213,10 @@ function ChatCore({ nickname }) {
 
       if (snapshot.empty) {
         setHasMoreMessages(false);
-        setIsPaginating(false);
         return;
       }
 
+      // 💡 Se establece el nuevo límite inferior (el documento más antiguo de esta nueva carga)
       const newOldestDocRef = snapshot.docs[snapshot.docs.length - 1];
       setOldestDocRef(newOldestDocRef);
 
@@ -220,18 +228,19 @@ function ChatCore({ nickname }) {
         }))
         .reverse();
 
+      // Agrega los mensajes antiguos *antes* de los mensajes existentes
       setMessages((prevMessages) => [...olderMessages, ...prevMessages]);
 
       if (snapshot.size < MESSAGES_PER_PAGE) {
         setHasMoreMessages(false);
       }
 
-      // RESTAURAR POSICIÓN DE SCROLL
+      // Restaura la posición del scroll después de que el DOM se actualice
       setTimeout(() => {
         keepScrollPosition(oldScrollHeight);
       }, 50);
     } catch (error) {
-      console.error("Fehler beim Laden älterer Nachrichten:", error);
+      console.error("Error al cargar mensajes antiguos:", error);
     } finally {
       setIsPaginating(false);
     }
@@ -242,7 +251,6 @@ function ChatCore({ nickname }) {
     oldestDocRef,
     keepScrollPosition,
   ]);
-
   // UPDATE TYPING STATUS
   const updateTypingStatus = useCallback(
     async (isUserTyping) => {
@@ -485,21 +493,34 @@ function ChatCore({ nickname }) {
   };
 
   // SCROLL-HANDLER FÜR PAGINIERUNG Y LECTURA
+  //   const handleScroll = () => {
+  //     if (messagesContainerRef.current) {
+  //       const { scrollTop } = messagesContainerRef.current;
+
+  //       // Activar la paginación si está cerca de la parte superior
+  //       if (scrollTop < 10 && !isPaginating && hasMoreMessages) {
+  //         loadOlderMessages();
+  //       }
+  //     }
+  //     // Llamar a updateLastRead después de un breve delay
+  //     // Usamos readStatusTimeoutRef para no interferir con el typingTimeoutRef
+  //     clearTimeout(readStatusTimeoutRef.current);
+  //     readStatusTimeoutRef.current = setTimeout(() => {
+  //       updateLastRead(messages);
+  //     }, 500);
+  //   };
+
   const handleScroll = () => {
     if (messagesContainerRef.current) {
       const { scrollTop } = messagesContainerRef.current;
 
-      // Activar la paginación si está cerca de la parte superior
+      // Cargar mensajes antiguos si el scroll está cerca de la parte superior (e.g., < 10px)
       if (scrollTop < 10 && !isPaginating && hasMoreMessages) {
         loadOlderMessages();
       }
+
+      // Además, llama a la lógica de actualización de estado de lectura aquí
     }
-    // Llamar a updateLastRead después de un breve delay
-    // Usamos readStatusTimeoutRef para no interferir con el typingTimeoutRef
-    clearTimeout(readStatusTimeoutRef.current);
-    readStatusTimeoutRef.current = setTimeout(() => {
-      updateLastRead(messages);
-    }, 500);
   };
 
   // ==========================================================
@@ -515,55 +536,63 @@ function ChatCore({ nickname }) {
       limit(MESSAGES_PER_PAGE)
     );
 
-    const unsubscribeMessages = onSnapshot(qMessages, (snapshot) => {
-      // 1. CONFIGURACIÓN DEL PUNTO DE PAGINACIÓN MÁS ANTIGUO
-      if (snapshot.docs.length > 0) {
-        const docRefOfOldest = snapshot.docs[snapshot.docs.length - 1];
-        setOldestDocRef(docRefOfOldest);
-        setHasMoreMessages(snapshot.docs.length >= MESSAGES_PER_PAGE);
-      } else {
-        setHasMoreMessages(false);
-      }
+    const unsubscribeMessages = onSnapshot(
+      qMessages,
+      (snapshot) => {
+        // 1. PREPARACIÓN DE MENSAJES Y SCROLL
+        const currentMessages = snapshot.docs
+          .map((doc) => ({
+            id: doc.id,
+            ...doc.data(),
+            docRef: doc,
+          }))
+          .reverse();
 
-      // 2. PREPARACIÓN PARA EL RENDERIZADO
-      const currentMessages = snapshot.docs
-        .map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-          docRef: doc,
-        }))
-        .reverse();
+        // Determinar si el usuario está cerca del final (para scroll automático)
+        const isScrolledToBottom = messagesContainerRef.current
+          ? messagesContainerRef.current.scrollHeight -
+              messagesContainerRef.current.scrollTop -
+              messagesContainerRef.current.clientHeight <
+            100
+          : true;
 
-      const isFirstLoad = messages.length === 0;
+        // 2. CONFIGURACIÓN DEL PUNTO DE PAGINACIÓN MÁS ANTIGUO
+        if (snapshot.docs.length > 0) {
+          const docRefOfOldest = snapshot.docs[snapshot.docs.length - 1];
+          setOldestDocRef(docRefOfOldest);
+          setHasMoreMessages(snapshot.docs.length >= MESSAGES_PER_PAGE);
+        } else {
+          setHasMoreMessages(false);
+        }
 
-      // Determinar si el usuario está cerca del final (para scroll automático)
-      const isScrolledToBottom = messagesContainerRef.current
-        ? messagesContainerRef.current.scrollHeight -
-            messagesContainerRef.current.scrollTop -
-            messagesContainerRef.current.clientHeight <
-          100
-        : true;
+        // 3. ACTUALIZACIÓN DE ESTADOS
+        setMessages(currentMessages);
+        setMessagesLoaded(true);
+        updateLastRead(currentMessages); // updateLastRead se llama aquí
 
-      setMessages(currentMessages);
-      setMessagesLoaded(true);
-      updateLastRead(currentMessages);
+        // 4. LÓGICA DE SCROLL ESTABLE (FIXED): Solo scroll si es carga inicial o mensaje del interlocutor
 
-      // Lógica de Scroll mejorada:
-      if (isFirstLoad) {
-        setTimeout(() => scrollToBottom("auto"), 50);
-      } else if (currentMessages.length > messages.length) {
-        const newMessage = currentMessages[currentMessages.length - 1];
+        // Determinar si el último mensaje en el snapshot proviene del interlocutor
+        const lastMessageSender =
+          currentMessages[currentMessages.length - 1]?.author;
+        const isRecipientMessage = lastMessageSender === recipientName;
 
-        if (newMessage?.author === currentUsername || isScrolledToBottom) {
+        if (isInitialLoadRef.current) {
+          // Carga inicial: siempre va al final.
+          isInitialLoadRef.current = false;
+          setTimeout(() => scrollToBottom("auto"), 50);
+        } else if (isRecipientMessage && isScrolledToBottom) {
+          // 💡 FIX: Solo scroll si el mensaje es del interlocutor Y estábamos cerca del fondo.
           setTimeout(() => scrollToBottom("smooth"), 50);
         }
-      }
-
+        // Si el mensaje es tuyo, se asume que el scroll fue manejado por la función sendMessage.
+      },
       (error) => {
+        // ✅ ERROR CALLBACK (TERCER ARGUMENTO)
         console.error("Firebase onSnapshot Error (Messages):", error);
         setMessagesLoaded(true);
-      };
-    });
+      }
+    );
 
     // 2. LISTENERS DE ESTADO DE LECTURA (FIRESTORE)
     const statusDocRef = doc(db, STATUS_COLLECTION, conversationId);
@@ -575,8 +604,8 @@ function ChatCore({ nickname }) {
       (docSnapshot) => {
         if (docSnapshot.exists()) {
           const data = docSnapshot.data();
-          setCurrentUserLastRead(data[currentUserReadField] || null); // Lo que yo leí
-          setLastMyMessageSeen(data[recipientReadField] || null); // Lo que el otro leyó (visto para mí)
+          setCurrentUserLastRead(data[currentUserReadField] || null);
+          setLastMyMessageSeen(data[recipientReadField] || null);
         } else {
           setCurrentUserLastRead(null);
           setLastMyMessageSeen(null);
@@ -597,8 +626,8 @@ function ChatCore({ nickname }) {
     conversationId,
     recipientName,
     currentUsername,
-    updateLastRead,
-    messages.length,
+    // updateLastRead,
+    // scrollToBottom,
   ]);
 
   // NEUER EFFEKT: Überprüft den Lesestatus des Empfängers
@@ -1218,7 +1247,12 @@ function ChatCore({ nickname }) {
       {/* FORMULARIO DE MENSAJES */}
       <form
         onSubmit={handleUploadAndSendMessage}
-        style={{ display: "flex", gap: "10px" }}
+        style={{
+          display: "flex",
+          gap: "10px",
+          flexWrap: "wrap",
+          width: "100%",
+        }}
       >
         {/* BOTÓN DE SELECCIÓN DE ARCHIVOS */}
         <input
@@ -1280,6 +1314,7 @@ function ChatCore({ nickname }) {
             cursor: "pointer",
             fontSize: "1em",
             fontWeight: "bold",
+            width: "100%",
           }}
         >
           {uploadProgress > 0 ? "Senden..." : "Senden"}
@@ -1484,6 +1519,7 @@ function App() {
   const [selectedNickname, setSelectedNickname] = useState(
     localStorage.getItem(NICKNAME_KEY)
   );
+
   const [nicknameInput, setNicknameInput] = useState("");
 
   const handleInputNickname = (e) => {
@@ -1506,29 +1542,35 @@ function App() {
   return (
     <div
       style={{
-        padding: "40px",
         maxWidth: "400px",
-        margin: "100px auto",
         border: "1px solid #ddd",
         borderRadius: "8px",
         textAlign: "center",
         fontFamily: "Arial, sans-serif",
+        height: "100vh",
+        display: "flex",
+        justifyContent: "center",
+        flexDirection: "column",
       }}
     >
-      <h1>Gib deinen Nickname ein</h1>
-      <p>Bitte gib deinen Nutzernamen ein, um den Chat zu starten.</p>
+      <h1 style={{ fontSize: "1.5em" }}>Gib deinen Nickname ein</h1>
 
-      <form onSubmit={handleInputNickname} style={{ marginTop: "20px" }}>
+      <form
+        onSubmit={handleInputNickname}
+        style={{ marginTop: "20px", width: "100%" }}
+      >
         <input
           type="text"
           value={nicknameInput}
+          name="nickname"
           onChange={(e) => setNicknameInput(e.target.value)}
           placeholder={`Gib deinen Nickname ein`}
           style={{
-            padding: "10px",
-            marginRight: "10px",
+            padding: "10px 0 10px 10px",
             borderRadius: "4px",
+            marginBottom: "10px",
             border: "1px solid #ccc",
+            width: "90%",
           }}
           required
         />
@@ -1541,6 +1583,8 @@ function App() {
             border: "none",
             borderRadius: "4px",
             cursor: "pointer",
+            width: "90%",
+            marginBottom: "20px",
           }}
         >
           Zum Chat
