@@ -1494,11 +1494,7 @@ function App() {
       setSelectedNickname(trimmedNickname);
       localStorage.setItem(NICKNAME_KEY, trimmedNickname);
     } else {
-      alert(
-        `Ungültiger Nickname. Bitte gib einen der folgenden Nutzernamen ein: ${VALID_USERS.join(
-          " oder "
-        )}`
-      );
+      alert(`Ungültiger Nickname`);
     }
   };
 
@@ -1527,7 +1523,7 @@ function App() {
           type="text"
           value={nicknameInput}
           onChange={(e) => setNicknameInput(e.target.value)}
-          placeholder={`Gib ${VALID_USERS.join(" oder ")} ein`}
+          placeholder={`Gib deinen Nickname ein`}
           style={{
             padding: "10px",
             marginRight: "10px",
