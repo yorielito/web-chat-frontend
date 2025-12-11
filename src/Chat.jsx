@@ -1560,7 +1560,7 @@ function App() {
         style={{ marginTop: "20px", width: "100%" }}
       >
         <input
-          type="text"
+          type="password"
           value={nicknameInput}
           name="nickname"
           onChange={(e) => setNicknameInput(e.target.value)}
